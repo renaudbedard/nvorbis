@@ -70,7 +70,10 @@ namespace NVorbis.Ogg
         void GetMorePackets()
         {
             // tell our container we need another page...  unless we've found the end of our stream.
-            if (!_eosFound) _container.GatherNextPage(_streamSerial);
+            using (var prl = _container.TakePageReaderLock())
+            {
+                if (!_eosFound) _container.GatherNextPage(_streamSerial, prl);
+            }
         }
 
         internal DataPacket GetNextPacket()
@@ -151,9 +154,12 @@ namespace NVorbis.Ogg
 
         internal void ReadAllPages()
         {
-            while (!_eosFound)
+            using (var prl = _container.TakePageReaderLock())
             {
-                _container.GatherNextPage(_streamSerial);
+                while (!_eosFound)
+                {
+                    _container.GatherNextPage(_streamSerial, prl);
+                }
             }
         }
 
@@ -239,11 +245,8 @@ namespace NVorbis.Ogg
                     // go ask the callback to calculate the granule count for this packet (given the surrounding packets)
                     packet.GranuleCount = packetGranuleCountCallback(packet.Prev, packet, packet.Next);
 
-                    // Something to think about...  Every packet that "ends" a page could have its granule position set directly...
-                    //   We don't do that because this does the job just as well, but maybe it would be a good idea?
-
-                    // if it's the last (or second-last in the stream) packet, or it's "Next" is continued, just use the page granule position
-                    if (packet == _last || (_eosFound && packet == _last.Prev) || packet.Next.IsContinued)
+                    // if it's the last (or second-last in the stream) packet, or it's "Next" is continued, or the next packet is on the next page, just use the page granule position
+                    if (packet == _last || (_eosFound && packet == _last.Prev) || packet.Next.IsContinued || packet.Next.PageSequenceNumber > packet.PageSequenceNumber)
                     {
                         // if the page's granule position is -1, something must be horribly wrong... (AddPacket should have addressed this above)
                         if (packet.PageGranulePosition == -1) throw new InvalidDataException();
