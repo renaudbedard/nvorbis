@@ -13,21 +13,21 @@ namespace NVorbis
 {
     static class ACache
     {
-        class Scope : IDisposable
+        class Scope
         {
             static Scope _global = new Scope(false);
 
-            [ThreadStatic]
-            static Scope _current;
+            //[ThreadStatic]
+            //static Scope _current;
 
             internal static Scope Current
             {
-                get { return _current ?? _global; }
+                get { return _global /*_current ?? _global */; }
             }
 
             internal static bool IsInScope
             {
-                get { return _current != null; }
+                get { return true; /*_current != null*/; }
             }
 
             #region Sub-Classes
@@ -219,10 +219,10 @@ namespace NVorbis
             internal Scope(bool setScope)
             {
                 _storage = new List<BufferStorage>();
-                if (setScope)
-                {
-                    _current = this;
-                }
+                //if (setScope)
+                //{
+                    //_current = this;
+                //}
             }
 
             BufferStorage<T> GetStorage<T>(bool firstTry)
@@ -258,7 +258,7 @@ namespace NVorbis
                     buffer.CloseScope();
                 }
                 _storage.Clear();
-                _current = null;
+                //_current = null;
             }
 
             #endregion
@@ -317,21 +317,21 @@ namespace NVorbis
             Scope.Current.Return<T[][]>(ref buffer);
         }
 
-        internal static IDisposable BeginScope()
+        internal static void BeginScope()
         {
-            if (!Scope.IsInScope)
-            {
-                return new Scope(true);
-            }
-            return null;
+//            if (!Scope.IsInScope)
+//            {
+//                return new Scope(true);
+//            }
+//            return null;
         }
 
         internal static void EndScope()
         {
-            if (Scope.IsInScope)
-            {
+//            if (Scope.IsInScope)
+//            {
                 Scope.Current.Dispose();
-            }
+//            }
         }
     }
 }
