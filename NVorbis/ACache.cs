@@ -7,261 +7,81 @@
  ***************************************************************************/
 using System;
 using System.Collections.Generic;
-using System.Threading;
 
 namespace NVorbis
 {
+    static class Hashing
+    {
+        static unsafe void Hash(byte* d, int len, ref uint h)
+        {
+            for (int i = 0; i < len; i++)
+            {
+                h += d[i];
+                h += (h << 10);
+                h ^= (h >> 6);
+            }
+        }
+        unsafe static void Hash(ref uint h, int data)
+        {
+            byte* d = (byte*)&data;
+            Hash(d, sizeof(int), ref h);
+        }
+
+        unsafe static int Avalanche(uint h)
+        {
+            h += (h << 3);
+            h ^= (h >> 11);
+            h += (h << 15);
+            return *((int*)(void*)&h);
+        }
+
+        public static int CombineHashCodes(int first, int second)
+        {
+            uint h = 0;
+            Hash(ref h, first);
+            Hash(ref h, second);
+            return Avalanche(h);
+        }
+    }
+
     static class ACache
     {
-        class Scope
+        static readonly Dictionary<BufferDescriptor, Stack<IBufferStorage>> buffers = new Dictionary<BufferDescriptor, Stack<IBufferStorage>>();
+
+        struct BufferDescriptor : IEquatable<BufferDescriptor> 
         {
-            static Scope _global = new Scope(false);
+            readonly Type Type;
+            readonly int Elements;
 
-            //[ThreadStatic]
-            //static Scope _current;
-
-            internal static Scope Current
+            public BufferDescriptor(Type type, int elements)
             {
-                get { return _global /*_current ?? _global */; }
+                Type = type;
+                Elements = elements;
             }
 
-            internal static bool IsInScope
+            public override int GetHashCode()
             {
-                get { return true; /*_current != null*/; }
+                return Hashing.CombineHashCodes(Type.GetHashCode(), Elements.GetHashCode());
             }
-
-            #region Sub-Classes
-
-            abstract class BufferStorage
+            public bool Equals(BufferDescriptor other)
             {
-                abstract internal void CloseScope();
-
-                abstract internal Type BufferType { get; }
+                return other.Type == Type && other.Elements == Elements;
             }
-
-            class BufferStorage<T> : BufferStorage
+            public override bool Equals(object other)
             {
-                class Item
-                {
-                    internal T[] Array;
-                    internal int Length;
-                    internal Item Next;
-                }
-
-                class ItemList
-                {
-                    Item _head;
-
-                    internal void Add(Item item)
-                    {
-                        do
-                        {
-                            item.Next = _head;
-                        } while (Interlocked.CompareExchange(ref _head, item, item.Next) != item.Next);
-                    }
-
-                    internal Item Get(int length)
-                    {
-                        Item node, nextNode;
-
-                        // if the node is the head, try to rotate it off
-                        while ((node = _head) != null && node.Length == length)
-                        {
-                            if (Interlocked.CompareExchange(ref _head, node.Next, node) == node)
-                            {
-                                node.Next = null;
-                                return node;
-                            }
-                        }
-
-                        // the node wasn't the head, so look through the list until we find it
-                        while (node != null && (nextNode = node.Next) != null)
-                        {
-                            if (nextNode.Length == length)
-                            {
-                                if ((node = Interlocked.CompareExchange(ref node.Next, nextNode.Next, nextNode)) == nextNode)
-                                {
-                                    nextNode.Next = null;
-                                    return nextNode;
-                                }
-                                else
-                                {
-                                    // try again
-                                    continue;
-                                }
-                            }
-
-                            node = node.Next;
-                        }
-
-                        return null;
-                    }
-
-                    internal Item Get(T[] array)
-                    {
-                        Item node, nextNode;
-
-                        // if the node is the head, try to rotate it off
-                        while ((node = _head) != null && node.Array == array)
-                        {
-                            if (Interlocked.CompareExchange(ref _head, node.Next, node) == node)
-                            {
-                                node.Next = null;
-                                return node;
-                            }
-                        }
-
-                        // the node wasn't the head, so look through the list until we find it
-                        while (node != null && (nextNode = node.Next) != null)
-                        {
-                            if (nextNode.Array == array)
-                            {
-                                if ((node = Interlocked.CompareExchange(ref node.Next, nextNode.Next, nextNode)) == nextNode)
-                                {
-                                    nextNode.Next = null;
-                                    return nextNode;
-                                }
-                                else
-                                {
-                                    // try again
-                                    continue;
-                                }
-                            }
-
-                            node = node.Next;
-                        }
-
-                        return null;
-                    }
-
-                    internal void ForEach(Action<Item> callback)
-                    {
-                        var node = _head;
-                        while (node != null)
-                        {
-                            var next = node.Next;
-                            callback(node);
-                            node = next;
-                        }
-                    }
-
-                    internal void Clear()
-                    {
-                        _head = null;
-                    }
-                }
-
-                ItemList _allocList = new ItemList();
-                ItemList _freeList = new ItemList();
-
-                internal T[] Get(int elements, bool clearFirst)
-                {
-                    var node = _freeList.Get(elements);
-                    if (node == null)
-                    {
-                        // create a new one
-                        node = new Item
-                        {
-                            Array = new T[elements],
-                            Length = elements
-                        };
-                    }
-                    else if (clearFirst)
-                    {
-                        Array.Clear(node.Array, 0, node.Length);
-                    }
-                    _allocList.Add(node);
-                    return node.Array;
-                }
-
-                internal void Return(ref T[] buffer)
-                {
-                    var node = _allocList.Get(buffer);
-                    if (node == null)
-                    {
-                        node = new Item
-                        {
-                            Array = buffer,
-                            Length = buffer.Length
-                        };
-                    }
-                    _freeList.Add(node);
-                    buffer = null;
-                }
-
-                override internal void CloseScope()
-                {
-                    var temp = new Action<Item>(CloseScopeForItem);
-                    _allocList.ForEach(temp);
-                    _freeList.ForEach(temp);
-
-                    _allocList.Clear();
-                    _freeList.Clear();
-                }
-
-                void CloseScopeForItem(Item node)
-                {
-                    _global.GetStorage<T>(true)._freeList.Add(node);
-                }
-
-                internal override Type BufferType
-                {
-                    get { return typeof(T); }
-                }
+                return other is BufferDescriptor && ((BufferDescriptor) other).Equals(this);
             }
+        }
 
-            #endregion
+        interface IBufferStorage { }
+        struct BufferStorage<T> : IBufferStorage
+        {
+            public readonly T[] Buffer;
 
-            #region Instance Members
-
-            List<BufferStorage> _storage;
-
-            internal Scope(bool setScope)
+            public BufferStorage(T[] buffer)
             {
-                _storage = new List<BufferStorage>();
-                //if (setScope)
-                //{
-                    //_current = this;
-                //}
+                Buffer = buffer;
             }
-
-            BufferStorage<T> GetStorage<T>(bool firstTry)
-            {
-                while (true)
-                {
-                    for (int i = 0; i < _storage.Count; i++)
-                    {
-                        var s = _storage[i];
-                        if (s.BufferType == typeof(T))
-                        {
-                            return (BufferStorage<T>)s;
-                        }
-                    }
-                    _storage.Add(new BufferStorage<T>());
-                }
-            }
-
-            internal T[] Get<T>(int elements, bool clearFirst)
-            {
-                return GetStorage<T>(true).Get(elements, clearFirst);
-            }
-
-            internal void Return<T>(ref T[] buffer)
-            {
-                GetStorage<T>(true).Return(ref buffer);
-            }
-
-            public void Dispose()
-            {
-                foreach (var buffer in _storage)
-                {
-                    buffer.CloseScope();
-                }
-                _storage.Clear();
-                //_current = null;
-            }
-
-            #endregion
         }
 
         internal static T[] Get<T>(int elements)
@@ -271,22 +91,36 @@ namespace NVorbis
 
         internal static T[] Get<T>(int elements, bool clearFirst)
         {
-            return Scope.Current.Get<T>(elements, clearFirst);
+            var descriptor = new BufferDescriptor(typeof(T), elements);
+
+            Stack<IBufferStorage> stack;
+            if (!buffers.TryGetValue(descriptor, out stack))
+                buffers.Add(descriptor, stack = new Stack<IBufferStorage>());
+
+            T[] buffer;
+            if (stack.Count == 0)   buffer = new T[elements];
+            else                    buffer = ((BufferStorage<T>) stack.Pop()).Buffer;
+
+            if (clearFirst)
+                for (int i = 0; i < elements; i++)
+                    buffer[i] = default(T);
+
+            return buffer;
         }
 
         internal static T[][] Get<T>(int firstRankSize, int secondRankSize)
         {
-            var temp = Scope.Current.Get<T[]>(firstRankSize, false);
+            var temp = Get<T[]>(firstRankSize, false);
             for (int i = 0; i < firstRankSize; i++)
             {
-                temp[i] = Scope.Current.Get<T>(secondRankSize, true);
+                temp[i] = Get<T>(secondRankSize, true);
             }
             return temp;
         }
 
         internal static T[][][] Get<T>(int firstRankSize, int secondRankSize, int thirdRankSize)
         {
-            var temp = Scope.Current.Get<T[][]>(firstRankSize, false);
+            var temp = Get<T[][]>(firstRankSize, false);
             for (int i = 0; i < firstRankSize; i++)
             {
                 temp[i] = Get<T>(secondRankSize, thirdRankSize);
@@ -296,42 +130,29 @@ namespace NVorbis
 
         internal static void Return<T>(ref T[] buffer)
         {
-            Scope.Current.Return<T>(ref buffer);
+            var descriptor = new BufferDescriptor(typeof(T), buffer.Length);
+            Stack<IBufferStorage> stack;
+            if (!buffers.TryGetValue(descriptor, out stack))
+                throw new InvalidOperationException("Returning a buffer that's never been taken!");
+            stack.Push(new BufferStorage<T>(buffer));
         }
 
         internal static void Return<T>(ref T[][] buffer)
         {
             for (int i = 0; i < buffer.Length; i++)
             {
-                if (buffer[i] != null) Return<T>(ref buffer[i]);
+                if (buffer[i] != null) Return(ref buffer[i]);
             }
-            Scope.Current.Return<T[]>(ref buffer);
+            Return<T[]>(ref buffer);
         }
 
         internal static void Return<T>(ref T[][][] buffer)
         {
             for (int i = 0; i < buffer.Length; i++)
             {
-                if (buffer[i] != null) Return<T>(ref buffer[i]);
+                if (buffer[i] != null) Return(ref buffer[i]);
             }
-            Scope.Current.Return<T[][]>(ref buffer);
-        }
-
-        internal static void BeginScope()
-        {
-//            if (!Scope.IsInScope)
-//            {
-//                return new Scope(true);
-//            }
-//            return null;
-        }
-
-        internal static void EndScope()
-        {
-//            if (Scope.IsInScope)
-//            {
-                Scope.Current.Dispose();
-//            }
+            Return<T[][]>(ref buffer);
         }
     }
 }

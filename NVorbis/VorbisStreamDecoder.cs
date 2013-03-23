@@ -582,7 +582,6 @@ namespace NVorbis
         void DecodeNextPacket()
         {
             _sw.Start();
-            ACache.BeginScope();
 
             try
             {
@@ -640,7 +639,6 @@ namespace NVorbis
             }
             finally
             {
-                ACache.EndScope();
                 _sw.Stop();
             }
         }
