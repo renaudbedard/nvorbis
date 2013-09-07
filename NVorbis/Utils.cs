@@ -58,11 +58,10 @@ namespace NVorbis
             fb.Bits = 0;
             fb.Float = value;
 
-            // as a courtesy to those writing out 24-bit and 16-bit samples, our full scale is 0.99999994 instead of 1.0
-            if ((fb.Bits & 0x7FFFFFFF) > 0x3f7fffff) // 0x3f7fffff == 0.99999994f
+            if ((fb.Bits & 0x7FFFFFFF) > 0x3f800000) // 0x3f800000 == 1.0f
             {
                 clipped = true;
-                fb.Bits = 0x3f7fffff | (fb.Bits & 0x80000000);
+                fb.Bits = 0x3f800000 | (fb.Bits & 0x80000000);
             }
             return fb.Float;
         }

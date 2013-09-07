@@ -12,7 +12,7 @@ using System.IO;
 
 namespace NVorbis.Ogg
 {
-    class PacketReader : IPacketProvider
+    class PacketReader
     {
         ContainerReader _container;
         int _streamSerial;
@@ -26,33 +26,7 @@ namespace NVorbis.Ogg
             _streamSerial = streamSerial;
         }
 
-        public void Dispose()
-        {
-            _eosFound = true;
-
-            _container.DisposePacketReader(this);
-            _container = null;
-
-            _current = null;
-
-            if (_first != null)
-            {
-                var node = _first;
-                _first = null;
-                while (node.Next != null)
-                {
-                    var temp = node.Next;
-                    node.Next = null;
-                    node = temp;
-                    node.Prev = null;
-                }
-                node = null;
-            }
-
-            _last = null;
-        }
-
-        internal void AddPacket(Packet packet)
+        internal void AddPacket(DataPacket packet)
         {
             // if the packet is a resync, it cannot be a continuation...
             if (packet.IsResync)
@@ -102,23 +76,7 @@ namespace NVorbis.Ogg
             }
         }
 
-        public int StreamSerial
-        {
-            get { return _streamSerial; }
-        }
-
-        public long ContainerBits
-        {
-            get;
-            set;
-        }
-
-        public bool CanSeek
-        {
-            get { return _container.CanSeek; }
-        }
-
-        public DataPacket GetNextPacket()
+        internal DataPacket GetNextPacket()
         {
             // "current" is always set to the packet previous to the one about to be returned...
 
@@ -144,7 +102,7 @@ namespace NVorbis.Ogg
                 }
             }
 
-            Packet packet;
+            DataPacket packet;
             if (_current == null)
             {
                 packet = (_current = _first);
@@ -162,24 +120,8 @@ namespace NVorbis.Ogg
             return packet;
         }
 
-        public DataPacket PeekNextPacket()
+        internal void SeekToPacket(int index)
         {
-            // this is a little bit of a hack, but it works...
-            var curPacket = _current;
-            try
-            {
-                return GetNextPacket();
-            }
-            finally
-            {
-                _current = curPacket;
-            }
-        }
-
-        public void SeekToPacket(int index)
-        {
-            if (!CanSeek) throw new InvalidOperationException();
-
             _current = GetPacketByIndex(index).Prev;
         }
 
@@ -212,8 +154,6 @@ namespace NVorbis.Ogg
 
         internal void ReadAllPages()
         {
-            if (!CanSeek) throw new InvalidOperationException();
-
             using (var prl = _container.TakePageReaderLock())
             {
                 while (!_eosFound)
@@ -230,7 +170,7 @@ namespace NVorbis.Ogg
             return _last;
         }
 
-        public int GetTotalPageCount()
+        internal int GetTotalPageCount()
         {
             ReadAllPages();
 
@@ -250,14 +190,14 @@ namespace NVorbis.Ogg
             return cnt;
         }
 
-        public DataPacket GetPacket(int packetIndex)
+        internal DataPacket GetPacket(int packetIndex)
         {
             var packet = GetPacketByIndex(packetIndex);
             packet.Reset();
             return packet;
         }
 
-        public int FindPacket(long granulePos, Func<DataPacket, DataPacket, int> packetGranuleCountCallback)
+        internal int FindPacket(long granulePos, Func<DataPacket, DataPacket, DataPacket, int> packetGranuleCountCallback)
         {
             // This will find which packet contains the granule position being requested.  It is basically a linear search.
             // Please note, the spec actually calls for a bisection search, but the result here should be the same.
@@ -288,7 +228,7 @@ namespace NVorbis.Ogg
 
             var packet = _last;
             // if the last packet is continued, ignore it (the page granule count actually applies to the previous packet)
-            while (packet.IsContinued)
+            if (packet.IsContinued)
             {
                 packet = packet.Prev;
             }
@@ -300,9 +240,10 @@ namespace NVorbis.Ogg
                     // fun part... make sure the packets are ready for "playback"
                     if (packet.Prev != null) packet.Prev.Reset();
                     packet.Reset();
+                    if (packet.Next != null) packet.Next.Reset();
 
                     // go ask the callback to calculate the granule count for this packet (given the surrounding packets)
-                    packet.GranuleCount = packetGranuleCountCallback(packet, packet.Prev);
+                    packet.GranuleCount = packetGranuleCountCallback(packet.Prev, packet, packet.Next);
 
                     // if it's the last (or second-last in the stream) packet, or it's "Next" is continued, or the next packet is on the next page, just use the page granule position
                     if (packet == _last || (_eosFound && packet == _last.Prev) || packet.Next.IsContinued || packet.Next.PageSequenceNumber > packet.PageSequenceNumber)
@@ -349,11 +290,6 @@ namespace NVorbis.Ogg
                 ++idx;
             }
             return idx;
-        }
-
-        public long GetGranuleCount()
-        {
-            return GetLastPacket().PageGranulePosition;
         }
     }
 }

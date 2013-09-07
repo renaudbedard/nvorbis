@@ -15,20 +15,21 @@ namespace NVorbis.Ogg
 {
     class Packet : DataPacket
     {
-        BufferedReadStream _stream;
+        Stream _stream;
 
         long _offset;
         long _length;
         Packet _mergedPacket;
 
+        byte[] _savedBuffer;
+        int _bufOffset;
+
         internal Packet Next { get; set; }
         internal Packet Prev { get; set; }
-        internal bool IsContinued { get; set; }
-        internal bool IsContinuation { get; set; }
 
         int _curOfs;
 
-        internal Packet(BufferedReadStream stream, long streamOffset, int length)
+        internal Packet(Stream stream, long streamOffset, int length)
             : base(length)
         {
             _stream = stream;
@@ -38,7 +39,13 @@ namespace NVorbis.Ogg
             _curOfs = 0;
         }
 
-        internal void MergeWith(NVorbis.DataPacket continuation)
+        internal void SetBuffer(byte[] savedBuf, int offset)
+        {
+            _savedBuffer = savedBuf;
+            _bufOffset = offset;
+        }
+
+        protected override void DoMergeWith(NVorbis.DataPacket continuation)
         {
             var op = continuation as Packet;
 
@@ -52,7 +59,7 @@ namespace NVorbis.Ogg
             }
             else
             {
-                _mergedPacket.MergeWith(continuation);
+                _mergedPacket.DoMergeWith(continuation);
             }
 
             // per the spec, a partial packet goes with the next page's granulepos.  we'll go ahead and assign it to the next page as well
@@ -60,14 +67,18 @@ namespace NVorbis.Ogg
             PageSequenceNumber = continuation.PageSequenceNumber;
         }
 
-        internal void Reset()
+        protected override bool CanReset
+        {
+            get { return true; }
+        }
+
+        protected override void DoReset()
         {
             _curOfs = 0;
-            ResetBitReader();
 
             if (_mergedPacket != null)
             {
-                _mergedPacket.Reset();
+                _mergedPacket.DoReset();
             }
         }
 
@@ -80,6 +91,11 @@ namespace NVorbis.Ogg
                 return _mergedPacket.ReadNextByte();
             }
 
+            if (_savedBuffer != null)
+            {
+                return _savedBuffer[_bufOffset + _curOfs++];
+            }
+
             _stream.Seek(_curOfs + _offset, SeekOrigin.Begin);
 
             var b = _stream.ReadByte();
@@ -89,13 +105,9 @@ namespace NVorbis.Ogg
 
         public override void Done()
         {
-            if (_mergedPacket != null)
+            if (_savedBuffer != null)
             {
-                _mergedPacket.Done();
-            }
-            else
-            {
-                _stream.DiscardThrough(_offset + _length);
+                _savedBuffer = null;
             }
         }
     }

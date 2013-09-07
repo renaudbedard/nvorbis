@@ -30,286 +30,254 @@ namespace NVorbis
             return residue;
         }
 
-        static int icount(int v)
-        {
-            var ret = 0;
-            while (v != 0)
-            {
-                ret += (v & 1);
-                v >>= 1;
-            }
-            return ret;
-        }
-
         VorbisStreamDecoder _vorbis;
-        float[][] _residue;
 
         protected VorbisResidue(VorbisStreamDecoder vorbis)
         {
             _vorbis = vorbis;
-
-            _residue = new float[_vorbis._channels][];
-            for (int i = 0; i < _vorbis._channels; i++)
-            {
-                _residue[i] = new float[_vorbis.Block1Size];
-            }
-        }
-
-        protected float[][] GetResidueBuffer(int channels)
-        {
-            var temp = _residue;
-            if (channels < _vorbis._channels)
-            {
-                temp = new float[channels][];
-                Array.Copy(_residue, temp, channels);
-            }
-            for (int i = 0; i < channels; i++)
-            {
-                Array.Clear(temp[i], 0, temp[i].Length);
-            }
-            return temp;
         }
 
         abstract internal float[][] Decode(DataPacket packet, bool[] doNotDecode, int channels, int blockSize);
 
         abstract protected void Init(DataPacket packet);
 
-        // residue type 0... samples are grouped by channel, then stored with non-interleaved dimensions (d0, d0, d0, d0, ..., d1, d1, d1, d1, ..., d2, d2, d2, d2, etc...)
         class Residue0 : VorbisResidue
         {
-            int _begin;
-            int _end;
-            int _partitionSize;
-            int _classifications;
-            int _maxStages;
-
-            VorbisCodebook[][] _books;
-            VorbisCodebook _classBook;
-
-            int[] _cascade, _entryCache;
-            int[][] _decodeMap;
-            int[][][] _partWordCache;
-
             internal Residue0(VorbisStreamDecoder vorbis) : base(vorbis) { }
 
             protected override void Init(DataPacket packet)
             {
-                // this is pretty well stolen directly from libvorbis...  BSD license
                 _begin = (int)packet.ReadBits(24);
                 _end = (int)packet.ReadBits(24);
                 _partitionSize = (int)packet.ReadBits(24) + 1;
                 _classifications = (int)packet.ReadBits(6) + 1;
-                _classBook = _vorbis.Books[(int)packet.ReadBits(8)];
+                _classBookNum = (int)packet.ReadBits(8);
+
+                _classBook = _vorbis.Books[_classBookNum];
 
                 _cascade = new int[_classifications];
                 var acc = 0;
+                var maxBits = 0;
                 for (int i = 0; i < _classifications; i++)
                 {
+                    var high_bits = 0;
                     var low_bits = (int)packet.ReadBits(3);
-                    if (packet.ReadBit())
-                    {
-                        _cascade[i] = (int)packet.ReadBits(5) << 3 | low_bits;
-                    }
-                    else
-                    {
-                        _cascade[i] = low_bits;
-                    }
+                    if (packet.ReadBit()) high_bits = (int)packet.ReadBits(5);
+                    _cascade[i] = high_bits << 3 | low_bits;
                     acc += icount(_cascade[i]);
+                    maxBits = Math.Max(Utils.ilog(_cascade[i]), maxBits);
                 }
+                _maxPasses = maxBits;
 
                 var bookNums = new int[acc];
                 for (var i = 0; i < acc; i++)
                 {
                     bookNums[i] = (int)packet.ReadBits(8);
-                    if (_vorbis.Books[bookNums[i]].MapType == 0) throw new InvalidDataException();
                 }
 
-                var entries = _classBook.Entries;
-                var dim = _classBook.Dimensions;
-                var partvals = 1;
-                while (dim > 0)
-                {
-                    partvals *= _classifications;
-                    if (partvals > entries) throw new InvalidDataException();
-                    --dim;
-                }
-
-                // now the lookups
-                dim = _classBook.Dimensions;
-
+                var bookIdx = 0;
                 _books = new VorbisCodebook[_classifications][];
-
-                acc = 0;
-                var maxstage = 0;
-                int stages;
-                for (int j = 0; j < _classifications; j++)
+                _bookNums = new int[_classifications][];
+                for (int i = 0; i < _classifications; i++)
                 {
-                    stages = Utils.ilog(_cascade[j]);
-                    _books[j] = new VorbisCodebook[stages];
-                    if (stages > 0)
+                    _books[i] = new VorbisCodebook[8];
+                    _bookNums[i] = new int[8];
+                    for (int j = 1, idx = 0; j < 256; j <<= 1, idx++)
                     {
-                        maxstage = Math.Max(maxstage, stages);
-                        for (int k = 0; k < stages; k++)
+                        if ((_cascade[i] & j) == j)
                         {
-                            if ((_cascade[j] & (1 << k)) > 0)
-                            {
-                                _books[j][k] = _vorbis.Books[bookNums[acc++]];
-                            }
+                            var bookNum = bookNums[bookIdx++];
+                            _books[i][idx] = _vorbis.Books[bookNum];
+                            _bookNums[i][idx] = bookNum;
+                            if (_books[i][idx].MapType == 0) throw new InvalidDataException();
                         }
                     }
                 }
-                _maxStages = maxstage;
 
-                _decodeMap = new int[partvals][];
-                for (int j = 0; j < partvals; j++)
-                {
-                    var val = j;
-                    var mult = partvals / _classifications;
-                    _decodeMap[j] = new int[_classBook.Dimensions];
-                    for (int k = 0; k < _classBook.Dimensions; k++)
-                    {
-                        var deco = val / mult;
-                        val -= deco * mult;
-                        mult /= _classifications;
-                        _decodeMap[j][k] = deco;
-                    }
-                }
-
-                _entryCache = new int[_partitionSize];
-
-                _partWordCache = new int[_vorbis._channels][][];
-                var maxPartWords = ((_end - _begin) / _partitionSize + _classBook.Dimensions - 1) / _classBook.Dimensions;
-                for (int ch = 0; ch < _vorbis._channels; ch++)
-                {
-                    _partWordCache[ch] = new int[maxPartWords][];
-                }
+                _classWordsPerCodeWord = _classBook.Dimensions;
+                _nToRead = _end - _begin;
+                _partsToRead = _nToRead / _partitionSize;
+                _partWords = (_partsToRead + _classWordsPerCodeWord - 1) / _classWordsPerCodeWord;
             }
+
+            static int icount(int v)
+            {
+                var ret = 0;
+                while (v != 0)
+                {
+                    ret += (v & 1);
+                    v >>= 1;
+                }
+                return ret;
+            }
+
+            protected int _begin;
+            protected int _end;
+            protected int _partitionSize;
+            protected int _classifications;
+            int _classBookNum;
+            protected int _maxPasses;
+
+            protected int[] _cascade;
+            int[][] _bookNums;
+
+            protected VorbisCodebook[][] _books;
+            protected VorbisCodebook _classBook;
+
+            protected int _classWordsPerCodeWord;
+            protected int _nToRead;
+            protected int _partsToRead;
+            protected int _partWords;
 
             internal override float[][] Decode(DataPacket packet, bool[] doNotDecode, int channels, int blockSize)
             {
-                var residue = GetResidueBuffer(doNotDecode.Length);
+                var residue = ACache.Get<float>(doNotDecode.Length, blockSize);
 
-                // this is pretty well stolen directly from libvorbis...  BSD license
-                var end = _end < blockSize / 2 ? _end : blockSize / 2;
-                var n = end - _begin;
-
-                if (n > 0 && doNotDecode.Contains(false))
+                if (_nToRead > 0)
                 {
-                    var partVals = n / _partitionSize;
-                    
-                    var partWords = (partVals + _classBook.Dimensions - 1) / _classBook.Dimensions;
-                    for (int j = 0; j < channels; j++)
-                    {
-                        Array.Clear(_partWordCache[j], 0, partWords);
-                    }
+                    var cls = ACache.Get<int>(channels, _partsToRead, _classWordsPerCodeWord);
 
-                    for (int s = 0; s < _maxStages; s++)
+                    for (var pass = 0; pass < _maxPasses; pass++)
                     {
-                        for (int i = 0, l = 0; i < partVals; l++)
+                        for (int i = 0, l = 0, offset = _begin; i < _partsToRead; l++)
                         {
-                            if (s == 0)
+                            if (pass == 0)
                             {
                                 for (int j = 0; j < channels; j++)
                                 {
-                                    _partWordCache[j][l] = _decodeMap[_classBook.DecodeScalar(packet)];
+                                    if (!doNotDecode[j])
+                                    {
+                                        var temp = _classBook.DecodeScalar(packet);
+                                        for (int pi = _classWordsPerCodeWord - 1; pi >= 0; pi--)
+                                        {
+                                            cls[j][l][pi] = temp % _classifications;
+                                            temp /= _classifications;
+                                        }
+                                    }
                                 }
                             }
-                            for (int k = 0; i < partVals && k < _classBook.Dimensions; k++, i++)
+
+                            for (int k = 0; k < _classWordsPerCodeWord && i < _partsToRead; ++k, ++i, offset += _partitionSize)
                             {
-                                var offset = _begin + i * _partitionSize;
-                                for (int j = 0; j < channels; j++)
+                                for (int j = 0; j < channels; ++j)
                                 {
-                                    var idx = _partWordCache[j][l][k];
-                                    if ((_cascade[idx] & (1 << s)) != 0)
+                                    if (!doNotDecode[j])
                                     {
-                                        var book = _books[idx][s];
-                                        if (book != null)
+                                        var vqclass = cls[j][l][k];
+                                        var codebook = _books[vqclass][pass];
+                                        if (codebook != null && codebook.MapType != 0)
                                         {
-                                            WriteVectors(book, packet, residue, j, offset, _partitionSize);
+                                            WriteVectors(codebook, packet, residue[j], offset, channel: j);
                                         }
                                     }
                                 }
                             }
                         }
                     }
+
+                    ACache.Return(ref cls);
                 }
 
                 return residue;
             }
 
-            virtual protected void WriteVectors(VorbisCodebook codebook, DataPacket packet, float[][] residue, int channel, int offset, int partitionSize)
+            virtual protected void WriteVectors(VorbisCodebook codebook, DataPacket packet, float[] residue, int offset, int channel)
             {
-                var res = residue[channel];
-                var step = partitionSize / codebook.Dimensions;
+                var step = _nToRead / codebook.Dimensions;
 
                 for (int i = 0; i < step; i++)
                 {
-                    _entryCache[i] = codebook.DecodeScalar(packet);
-                }
-                for (int i = 0; i < codebook.Dimensions; i++)
-                {
-                    for (int j = 0; j < step; j++, offset++)
+                    var j = 0;
+                    var entry = codebook.DecodeScalar(packet);
+                    for (var d = 0; d < codebook.Dimensions; d++)
                     {
-                        res[offset] += codebook[_entryCache[j], i];
+                        residue[offset + i + j++ * step] += codebook[entry, d];
                     }
                 }
             }
         }
 
-        // residue type 1... samples are grouped by channel, then stored with interleaved dimensions (d0, d1, d2, d0, d1, d2, etc...)
         class Residue1 : Residue0
         {
             internal Residue1(VorbisStreamDecoder vorbis) : base(vorbis) { }
 
-            protected override void WriteVectors(VorbisCodebook codebook, DataPacket packet, float[][] residue, int channel, int offset, int partitionSize)
+            protected override void WriteVectors(VorbisCodebook codebook, DataPacket packet, float[] residue, int offset, int channel)
             {
-                var res = residue[channel];
-
-                for (int i = 0; i < partitionSize; )
+                for (int i = 0; i < _partitionSize;)
                 {
                     var entry = codebook.DecodeScalar(packet);
-                    for (int j = 0; j < codebook.Dimensions; i++, j++)
+                    for (var d = 0; d < codebook.Dimensions; d++)
                     {
-                        res[offset + i] += codebook[entry, j];
+                        residue[offset + i++] += codebook[entry, d];
                     }
                 }
             }
         }
 
-        // residue type 2... basically type 0, but samples are interleaved between channels (ch0, ch1, ch0, ch1, etc...)
-        class Residue2 : Residue0
+        class Residue2 : Residue1
         {
-            int _channels;
-
             internal Residue2(VorbisStreamDecoder vorbis) : base(vorbis) { }
 
-            // We can use the type 0 logic by saying we're doing a single channel buffer big enough to hold the samples for all channels
-            // This works because WriteVectors(...) "knows" the correct channel count and processes the data accordingly.
             internal override float[][] Decode(DataPacket packet, bool[] doNotDecode, int channels, int blockSize)
             {
-                _channels = channels;
+                var residue = ACache.Get<float>(channels, blockSize);
+                var elementsPerChannel = _partitionSize / channels;
 
-                return base.Decode(packet, doNotDecode, 1, blockSize * channels);
-            }
-
-            protected override void WriteVectors(VorbisCodebook codebook, DataPacket packet, float[][] residue, int channel, int offset, int partitionSize)
-            {
-                var chPtr = 0;
-
-                offset /= _channels;
-                for (int c = 0; c < partitionSize; )
+                if (doNotDecode.Contains(false))
                 {
-                    var entry = codebook.DecodeScalar(packet);
-                    for (var d = 0; d < codebook.Dimensions; d++, c++)
+                    if (_nToRead > 0)
                     {
-                        residue[chPtr][offset] += codebook[entry, d];
-                        if (++chPtr == _channels)
+                        var cls = ACache.Get<int>(_partWords, _classWordsPerCodeWord);
+
+                        for (int pass = 0; pass < _maxPasses; pass++)
                         {
-                            chPtr = 0;
-                            offset++;
+                            for (int i = 0, l = 0, offset = _begin; i < _partsToRead; l++)
+                            {
+                                if (pass == 0)
+                                {
+                                    var temp = _classBook.DecodeScalar(packet);
+                                    for (int c = _classWordsPerCodeWord - 1; c >= 0 && temp > 0; c--)
+                                    {
+                                        cls[l][c] = temp % _classifications;
+                                        temp /= _classifications;
+                                    }
+                                }
+
+                                for (int k = 0; k < _classWordsPerCodeWord && i < _partsToRead; k++)
+                                {
+                                    var vqclass = cls[l][k];
+                                    var codebook = _books[vqclass][pass];
+                                    if (codebook != null && codebook.MapType != 0)
+                                    {
+                                        var chPtr = 0;
+                                        var dim = codebook.Dimensions;
+
+                                        for (int c = 0, t = offset / channels; c < elementsPerChannel; )
+                                        {
+                                            var entry = codebook.DecodeScalar(packet);
+                                            for (var d = 0; d < dim; d++)
+                                            {
+                                                residue[chPtr][t] += codebook[entry, d];
+                                                if (++chPtr == channels)
+                                                {
+                                                    chPtr = 0;
+                                                    c++;
+                                                    t++;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    ++i;
+                                    offset += _partitionSize;
+                                }
+                            }
                         }
+
+                        ACache.Return(ref cls);
                     }
                 }
+
+                return residue;
             }
         }
     }

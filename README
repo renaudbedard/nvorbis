@@ -70,26 +70,5 @@ History
     * Added constructor to NAudioSupport for already opened Stream instances
     * Made Ogg container logic thread-safe
     * Cleanup & Optimization
-0.6.0 - 06/27/2013
-    * Remove ACache from project
-    * Make clipping optional (default: on)
-    * Set clipping to clamp at +/-.99999994 instead of +/-1 as a courtesy to those not outputing float samples
-    * Performance improvements for RingBuffer
-    * Performance improvements in ThreadSafeStream
-0.7.0 - 07/15/2013
-    * Rewrite Ogg Reader buffering logic to vastly improve memory usage
-    * Reorganize to more easily support other container types / work with other Ogg stream decoders
-    * Exposed Ogg reading types
-    * Performance improvements
-    * Bugfix: Don't throw on Vorbis streams that only have a single mode
-0.7.1 - 07/18/2013
-    * Removed use of generics & lambda from Huffman decoder
-    * Reduced computation by only processing samples that are required for output
-    * Bugfix: Seeking now works again
-    * Bugfix: OpenTKSupport.OggStream now only queues as many source buffers as it filled
-0.7.2 - 07/22/2013
-    * Bugfix: Floor 0 implementation is now correct
-    * Bugfix: Residue 0 & 1 implementation is now correct
-    * Bugfix: Seeking back less than the current buffer size no longer corrupts the read buffer
-0.7.3 - 08/02/2013
-    * Bugfix: Fix residue 1
+0.6.0 - 
+    * Rework ACache to be truly thread-safe

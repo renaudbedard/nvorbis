@@ -43,14 +43,12 @@ namespace NVorbis.OpenTKSupport
         readonly Stream underlyingStream;
 
         internal VorbisReader Reader { get; private set; }
-        public bool Ready { get; private set; }
+        internal bool Ready { get; private set; }
         internal bool Preparing { get; private set; }
 
         public int BufferCount { get; private set; }
 
         public ILogger Logger { private get; set; }
-
-        internal EventHandler Finished;
 
         public OggStream(string filename, int bufferCount = DefaultBufferCount) : this(File.OpenRead(filename), bufferCount) { }
         public OggStream(Stream stream, int bufferCount = DefaultBufferCount)
@@ -174,7 +172,6 @@ namespace NVorbis.OpenTKSupport
 
             lock (stopMutex)
             {
-                NotifyFinished();
                 OggStreamer.Instance.RemoveStream(this);
             }
         }
@@ -240,16 +237,6 @@ namespace NVorbis.OpenTKSupport
         {
             AL.SourceStop(alSourceId);
             ALHelper.Check();
-        }
-
-        internal void NotifyFinished()
-        {
-            var callback = Finished;
-            if (callback != null)
-            {
-                callback(this, EventArgs.Empty);
-                Finished = null;  // This is not typical...  Usually we count on whatever code added the event handler to also remove it
-            }
         }
 
         void Empty()
@@ -331,9 +318,9 @@ namespace NVorbis.OpenTKSupport
         readonly short[] castBuffer;
 
         readonly HashSet<OggStream> streams = new HashSet<OggStream>();
-        readonly List<OggStream> threadLocalStreams = new List<OggStream>();
+        readonly List<OggStream> threadLocalStreams = new List<OggStream>(); 
 
-        Thread underlyingThread;
+        readonly Thread underlyingThread;
         volatile bool cancelled;
 
         public float UpdateRate { get; private set; }
@@ -356,13 +343,7 @@ namespace NVorbis.OpenTKSupport
             private set { lock (singletonMutex) instance = value; }
         }
 
-        /// <summary>
-        /// Constructs an OggStreamer that plays ogg files in the background
-        /// </summary>
-        /// <param name="bufferSize">Buffer size</param>
-        /// <param name="updateRate">Number of times per second to update</param>
-        /// <param name="internalThread">True to use an internal thread, false to use your own thread, in which case use must call EnsureBuffersFilled periodically</param>
-        public OggStreamer(int bufferSize = DefaultBufferSize, float updateRate = DefaultUpdateRate, bool internalThread = true)
+        public OggStreamer(int bufferSize = DefaultBufferSize, float updateRate = DefaultUpdateRate)
         {
             lock (singletonMutex)
             {
@@ -370,16 +351,8 @@ namespace NVorbis.OpenTKSupport
                     throw new InvalidOperationException("Already running");
 
                 Instance = this;
-                if (internalThread)
-                {
-                    underlyingThread = new Thread(EnsureBuffersFilled) { Priority = ThreadPriority.Lowest };
-                    underlyingThread.Start();
-                }
-                else
-                {
-                    // no need for this, user is in charge
-                    updateRate = 0;
-                }
+                underlyingThread = new Thread(EnsureBuffersFilled) { Priority = ThreadPriority.Lowest };
+                underlyingThread.Start();
             }
 
             UpdateRate = updateRate;
@@ -402,7 +375,6 @@ namespace NVorbis.OpenTKSupport
                     streams.Clear();
 
                 Instance = null;
-                underlyingThread = null;
             }
         }
 
@@ -435,7 +407,7 @@ namespace NVorbis.OpenTKSupport
 
             return readSamples != BufferSize;
         }
-        public static void CastBuffer(float[] inBuffer, short[] outBuffer, int length)
+        static void CastBuffer(float[] inBuffer, short[] outBuffer, int length)
         {
             for (int i = 0; i < length; i++)
             {
@@ -446,10 +418,13 @@ namespace NVorbis.OpenTKSupport
             }
         }
 
-        public void EnsureBuffersFilled()
+        void EnsureBuffersFilled()
         {
-            do
+            while (!cancelled)
             {
+                Thread.Sleep((int) (1000 / UpdateRate));
+                if (cancelled) break;
+
                 threadLocalStreams.Clear();
                 lock (iterationMutex) threadLocalStreams.AddRange(streams);
 
@@ -478,35 +453,23 @@ namespace NVorbis.OpenTKSupport
                         else
                             tempBuffers = stream.alBufferIds.Skip(queued).ToArray();
 
-                        int bufIdx = 0;
-                        for (; bufIdx < tempBuffers.Length; bufIdx++)
+                        for (int i = 0; i < tempBuffers.Length; i++)
                         {
-                            finished |= FillBuffer(stream, tempBuffers[bufIdx]);
+                            finished |= FillBuffer(stream, tempBuffers[i]);
 
                             if (finished)
                             {
                                 if (stream.IsLooped)
-                                {
                                     stream.Reader.DecodedTime = TimeSpan.Zero;
-                                    if (bufIdx == 0)
-                                    {
-                                        // we didn't have any buffers left over, so let's start from the beginning on the next cycle...
-                                        continue;
-                                    }
-                                }
                                 else
                                 {
-                                    lock (stream.stopMutex)
-                                    {
-                                        stream.NotifyFinished();
-                                    }
                                     streams.Remove(stream);
-                                    break;
+                                    i = tempBuffers.Length;
                                 }
                             }
                         }
 
-                        AL.SourceQueueBuffers(stream.alSourceId, bufIdx, tempBuffers);
+                        AL.SourceQueueBuffers(stream.alSourceId, tempBuffers.Length, tempBuffers);
                         ALHelper.Check();
 
                         if (finished && !stream.IsLooped)
@@ -530,13 +493,7 @@ namespace NVorbis.OpenTKSupport
                         }
                     }
                 }
-
-                if (UpdateRate > 0)
-                {
-                    Thread.Sleep((int)(1000 / UpdateRate));
-                }
             }
-            while (underlyingThread != null && !cancelled);
         }
     }
 }
