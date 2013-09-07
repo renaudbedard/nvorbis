@@ -122,7 +122,7 @@ namespace NVorbis
 
             if (!ComputeCodewords(sparse, sortedEntries, codewords, codewordLengths, len: Lengths, n: Entries, values: values)) throw new InvalidDataException();
 
-            LTree = Huffman.BuildLinkedList<int>(values ?? Enumerable.Range(0, codewords.Length).ToArray(), codewordLengths ?? Lengths, codewords);
+            LTree = Huffman.BuildLinkedList(values ?? Enumerable.Range(0, codewords.Length).ToArray(), codewordLengths ?? Lengths, codewords);
         }
 
         bool ComputeCodewords(bool sparse, int sortedEntries, int[] codewords, int[] codewordLengths, int[] len, int n, int[] values)
@@ -251,7 +251,7 @@ namespace NVorbis
 
         internal int Dimensions;
 
-        int Entries;
+        internal int Entries;
 
         int[] Lengths;
 
@@ -259,7 +259,7 @@ namespace NVorbis
 
         internal int MapType;
 
-        HuffmanListNode<int> LTree;
+        HuffmanListNode LTree;
         int MaxBits;
 
         internal float this[int entry, int dim]

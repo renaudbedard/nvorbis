@@ -39,7 +39,7 @@ namespace NVorbis
 
         abstract protected void Init(DataPacket packet);
 
-        abstract internal PacketData UnpackPacket(DataPacket packet, int blockSize);
+        abstract internal PacketData UnpackPacket(DataPacket packet, int blockSize, int channel);
 
         abstract internal void Apply(PacketData packetData, float[] residue);
 
@@ -61,46 +61,82 @@ namespace NVorbis
         {
             internal Floor0(VorbisStreamDecoder vorbis) : base(vorbis) { }
 
-            int _order, _rate, _bark_map_size, _ampBits, _ampOfs;
+            int _order, _rate, _bark_map_size, _ampBits, _ampOfs, _ampDiv;
             VorbisCodebook[] _books;
             int _bookBits;
-            Dictionary<int, float[]> _barkMaps;
+            Dictionary<int, float[]> _wMap;
+            Dictionary<int, int[]> _barkMaps;
 
             protected override void Init(DataPacket packet)
             {
+                // this is pretty well stolen directly from libvorbis...  BSD license
                 _order = (int)packet.ReadBits(8);
                 _rate = (int)packet.ReadBits(16);
                 _bark_map_size = (int)packet.ReadBits(16);
                 _ampBits = (int)packet.ReadBits(6);
                 _ampOfs = (int)packet.ReadBits(8);
-
                 _books = new VorbisCodebook[(int)packet.ReadBits(4) + 1];
+
+                if (_order < 1 || _rate < 1 || _bark_map_size < 1 || _books.Length == 0) throw new InvalidDataException();
+
+                _ampDiv = (1 << _ampBits) - 1;
+
                 for (int i = 0; i < _books.Length; i++)
                 {
-                    _books[i] = _vorbis.Books[(int)packet.ReadBits(8)];
+                    var num = (int)packet.ReadBits(8);
+                    if (num < 0 || num >= _vorbis.Books.Length) throw new InvalidDataException();
+                    var book = _vorbis.Books[num];
+
+                    if (book.MapType == 0 || book.Dimensions < 1) throw new InvalidDataException();
+
+                    _books[i] = book;
                 }
                 _bookBits = Utils.ilog(_books.Length);
 
-                _barkMaps = new Dictionary<int, float[]>();
-                _barkMaps[_vorbis.Block0Size] = SynthesizeBarkCurve(_vorbis.Block0Size);
-                _barkMaps[_vorbis.Block1Size] = SynthesizeBarkCurve(_vorbis.Block1Size);
+                _barkMaps = new Dictionary<int, int[]>();
+                _barkMaps[_vorbis.Block0Size] = SynthesizeBarkCurve(_vorbis.Block0Size / 2);
+                _barkMaps[_vorbis.Block1Size] = SynthesizeBarkCurve(_vorbis.Block1Size / 2);
+
+                _wMap = new Dictionary<int, float[]>();
+                _wMap[_vorbis.Block0Size] = SynthesizeWDelMap(_vorbis.Block0Size / 2);
+                _wMap[_vorbis.Block1Size] = SynthesizeWDelMap(_vorbis.Block1Size / 2);
+
+                _reusablePacketData = new PacketData0[_vorbis._channels];
+                for (int i = 0; i < _reusablePacketData.Length; i++)
+                {
+                    _reusablePacketData[i] = new PacketData0() { Coeff = new float[_order + 1] };
+                }
             }
 
-            float[] SynthesizeBarkCurve(int n)
+            int[] SynthesizeBarkCurve(int n)
             {
-                var map = new float[n + 1];
+                var scale = _bark_map_size / toBARK(_rate / 2);
+
+                var map = new int[n + 1];
+
                 for (int i = 0; i < n - 1; i++)
                 {
-                    var foobar = toBARK((_rate * i) / (2 * n)) * (_bark_map_size / toBARK(.5 * _rate));
-                    map[i] = Math.Min(_bark_map_size - 1, foobar);
+                    map[i] = Math.Min(_bark_map_size - 1, (int)Math.Floor(toBARK((_rate / 2f) / n * i) * scale));
                 }
-                map[n] = -1.0f;
+                map[n] = -1;
                 return map;
             }
 
             static float toBARK(double lsp)
             {
                 return (float)(13.1 * Math.Atan(0.00074 * lsp) + 2.24 * Math.Atan(0.0000000185 * lsp * lsp) + .0001 * lsp);
+            }
+
+            float[] SynthesizeWDelMap(int n)
+            {
+                var wdel = (float)(Math.PI / _bark_map_size);
+
+                var map = new float[n];
+                for (int i = 0; i < n; i++)
+                {
+                    map[i] = 2f * (float)Math.Cos(wdel * i);
+                }
+                return map;
             }
 
             class PacketData0 : PacketData
@@ -114,30 +150,49 @@ namespace NVorbis
                 internal float Amp;
             }
 
-            internal override PacketData UnpackPacket(DataPacket packet, int blockSize)
+            PacketData0[] _reusablePacketData;
+
+            internal override PacketData UnpackPacket(DataPacket packet, int blockSize, int channel)
             {
-                var data = new PacketData0 { BlockSize = blockSize };
+                var data = _reusablePacketData[channel];
+                data.BlockSize = blockSize;
+                data.ForceEnergy = false;
+                data.ForceNoEnergy = false;
+
                 data.Amp = packet.ReadBits(_ampBits);
                 if (data.Amp > 0f)
                 {
+                    // this is pretty well stolen directly from libvorbis...  BSD license
+                    Array.Clear(data.Coeff, 0, data.Coeff.Length);
+
+                    data.Amp = (float)(data.Amp / _ampDiv * _ampOfs);
+
                     try
                     {
-                        var coefficients = new List<float>();
                         var bookNum = (uint)packet.ReadBits(_bookBits);
                         if (bookNum >= _books.Length) throw new InvalidDataException();
                         var book = _books[bookNum];
 
-                        for (int i = 0; i < _order; i++)
+                        // first, the book decode...
+                        for (int i = 0; i < _order; )
                         {
                             var entry = book.DecodeScalar(packet);
-                            for (int d = 0; d < book.Dimensions; d++)
+                            for (int j = 0; i < _order && j < book.Dimensions; j++, i++)
                             {
-                                coefficients.Add(book[entry, d]);
+                                data.Coeff[i] = book[entry, j];
                             }
-                            //book.DecodeVQ(packet, t => coefficients.Add(t));
                         }
 
-                        data.Coeff = coefficients.ToArray();
+                        // then, the "averaging"
+                        var last = 0f;
+                        for (int j = 0; j < _order; )
+                        {
+                            for (int k = 0; j < _order && k < book.Dimensions; j++, k++)
+                            {
+                                data.Coeff[j] += last;
+                            }
+                            last = data.Coeff[j - 1];
+                        }
                     }
                     catch (EndOfStreamException)
                     {
@@ -155,66 +210,53 @@ namespace NVorbis
 
                 if (data.Amp > 0f)
                 {
-                    // now we have the black art of high-end math... (this version is slow!)
+                    // this is pretty well stolen directly from libvorbis...  BSD license
                     var barkMap = _barkMaps[data.BlockSize];
+                    var wMap = _wMap[data.BlockSize];
+                    var n = data.BlockSize / 2;
 
-                    for (int i = 0; i < data.BlockSize; )
+                    int i = 0;
+                    for (i = 0; i < _order; i++)
                     {
-                        var w = Math.PI * barkMap[i] / _bark_map_size;
-                        float multiplierP, multiplierQ;
-                        int orderAdjP, orderAdjQ;
-                        if (_order % 2 == 1)
+                        data.Coeff[i] = 2f * (float)Math.Cos(data.Coeff[i]);
+                    }
+
+                    i = 0;
+                    while (i < n)
+                    {
+                        int j;
+                        var k = barkMap[i];
+                        var p = .5f;
+                        var q = .5f;
+                        var w = wMap[k];
+                        for (j = 1; j < _order; j += 2)
                         {
-                            // odd
-                            multiplierP = (float)(1.0 - Math.Pow(Math.Cos(w), 2));
-                            orderAdjP = 3;
-                            multiplierQ = .25f;
-                            orderAdjQ = 1;
+                            q *= w - data.Coeff[j - 1];
+                            p *= w - data.Coeff[j];
+                        }
+                        if (j == _order)
+                        {
+                            // odd order filter; slightly assymetric
+                            q *= w - data.Coeff[j - 1];
+                            p *= p * (4f - w * w);
+                            q *= q;
                         }
                         else
                         {
-                            // even
-                            multiplierP = (float)(1.0 - Math.Cos(w));
-                            orderAdjP = 2;
-                            multiplierQ = (float)(1.0 + Math.Cos(w));
-                            orderAdjQ = 2;
+                            // even order filter; still symetric
+                            p *= p * (2f - w);
+                            q *= q * (2f + w);
                         }
-                        // now down to business...
-                        var p = multiplierP *
-                            (_order - orderAdjP) /
-                            (
-                                (4 * Math.Pow(Math.Cos(data.Coeff[1]) - Math.Cos(w), 2)) *
-                                (4 * Math.Pow(Math.Cos(data.Coeff[3]) - Math.Cos(w), 2)) *
-                                (4 * Math.Pow(Math.Cos(data.Coeff[5]) - Math.Cos(w), 2))
-                            );
-                        var q = multiplierQ *
-                            (_order - orderAdjQ) /
-                            (
-                                (4 * Math.Pow(Math.Cos(data.Coeff[0]) - Math.Cos(w), 2)) *
-                                (4 * Math.Pow(Math.Cos(data.Coeff[2]) - Math.Cos(w), 2)) *
-                                (4 * Math.Pow(Math.Cos(data.Coeff[4]) - Math.Cos(w), 2))
-                            );
 
-                        // finally, get the linear value
-                        var value = (float)Math.Exp(
-                            .11512925 *
-                            (
-                                (data.Amp * _ampOfs) /
-                                (
-                                    ((1 << _ampBits) - 1) *
-                                    Math.Sqrt(p + q)
-                                ) -
-                                _ampOfs
-                            )
-                        );
+                        // calc the dB of this bark section
+                        q = data.Amp / (float)Math.Sqrt(p + q) - _ampOfs;
 
-                        while (true)
-                        {
-                            var iteration_condition = barkMap[i];
-                            residue[i] *= value;
-                            i++;
-                            if (barkMap[i] != iteration_condition) break;
-                        }
+                        // now convert to a linear sample multiplier
+                        q = (float)Math.Exp(q * 0.11512925f);
+
+                        residue[i] *= q;
+
+                        while (barkMap[++i] == k) residue[i] *= q;
                     }
                 }
             }
@@ -332,22 +374,36 @@ namespace NVorbis
                         }
                     }
                 }
+
+                // pre-create our packet data instances
+                _reusablePacketData = new PacketData1[_vorbis._channels];
+                for (int i = 0; i < _reusablePacketData.Length; i++)
+                {
+                    _reusablePacketData[i] = new PacketData1();
+                }
             }
 
             class PacketData1 : PacketData
             {
                 protected override bool HasEnergy
                 {
-                    get { return Posts != null; }
+                    get { return PostCount > 0; }
                 }
 
-                public int[] Posts;
+                public int[] Posts = new int[64];
                 public int PostCount;
             }
 
-            internal override PacketData UnpackPacket(DataPacket packet, int blockSize)
+            PacketData1[] _reusablePacketData;
+
+            internal override PacketData UnpackPacket(DataPacket packet, int blockSize, int channel)
             {
-                var data = new PacketData1 { BlockSize = blockSize };
+                var data = _reusablePacketData[channel];
+                data.BlockSize = blockSize;
+                data.ForceEnergy = false;
+                data.ForceNoEnergy = false;
+                data.PostCount = 0;
+                Array.Clear(data.Posts, 0, 64);
 
                 // hoist ReadPosts to here since that's all we're doing...
                 if (packet.ReadBit())
@@ -355,9 +411,8 @@ namespace NVorbis
                     try
                     {
                         var postCount = 2;
-                        var posts = ACache.Get<int>(64);
-                        posts[0] = (int)packet.ReadBits(_yBits);
-                        posts[1] = (int)packet.ReadBits(_yBits);
+                        data.Posts[0] = (int)packet.ReadBits(_yBits);
+                        data.Posts[1] = (int)packet.ReadBits(_yBits);
 
                         for (int i = 0; i < _partitionClass.Length; i++)
                         {
@@ -376,13 +431,12 @@ namespace NVorbis
                                 cval >>= cbits;
                                 if (book != null)
                                 {
-                                    posts[postCount] = (int)book.DecodeScalar(packet);
+                                    data.Posts[postCount] = (int)book.DecodeScalar(packet);
                                 }
                                 ++postCount;
                             }
                         }
 
-                        data.Posts = posts;
                         data.PostCount = postCount;
                     }
                     catch (EndOfStreamException)
@@ -398,7 +452,7 @@ namespace NVorbis
                 var data = packetData as PacketData1;
                 if (data == null) throw new InvalidDataException("Incorrect packet data!");
 
-                if (data.Posts != null)
+                if (data.PostCount > 0)
                 {
                     var stepFlags = UnwrapPosts(data);
 
@@ -421,33 +475,32 @@ namespace NVorbis
                         if (lx >= n) break;
                     }
 
-                    ACache.Return(ref stepFlags);
-
                     if (lx < n)
                     {
                         RenderLineMulti(lx, ly, n, ly, residue);
                     }
-
-                    ACache.Return(ref data.Posts);
                 }
             }
 
+            bool[] _stepFlags = new bool[64];
+            int[] _finalY = new int[64];
+
             bool[] UnwrapPosts(PacketData1 data)
             {
-                var stepFlags = ACache.Get<bool>(data.PostCount, false);
-                stepFlags[0] = true;
-                stepFlags[1] = true;
+                Array.Clear(_stepFlags, 2, 62);
+                _stepFlags[0] = true;
+                _stepFlags[1] = true;
 
-                var finalY = ACache.Get<int>(data.PostCount);
-                finalY[0] = data.Posts[0];
-                finalY[1] = data.Posts[1];
+                Array.Clear(_finalY, 2, 62);
+                _finalY[0] = data.Posts[0];
+                _finalY[1] = data.Posts[1];
 
                 for (int i = 2; i < data.PostCount; i++)
                 {
                     var lowOfs = _lNeigh[i];
                     var highOfs = _hNeigh[i];
 
-                    var predicted = RenderPoint(_xList[lowOfs], finalY[lowOfs], _xList[highOfs], finalY[highOfs], _xList[i]);
+                    var predicted = RenderPoint(_xList[lowOfs], _finalY[lowOfs], _xList[highOfs], _finalY[highOfs], _xList[i]);
 
                     var val = data.Posts[i];
                     var highroom = _range - predicted;
@@ -463,19 +516,19 @@ namespace NVorbis
                     }
                     if (val != 0)
                     {
-                        stepFlags[lowOfs] = true;
-                        stepFlags[highOfs] = true;
-                        stepFlags[i] = true;
+                        _stepFlags[lowOfs] = true;
+                        _stepFlags[highOfs] = true;
+                        _stepFlags[i] = true;
 
                         if (val >= room)
                         {
                             if (highroom > lowroom)
                             {
-                                finalY[i] = val - lowroom + predicted;
+                                _finalY[i] = val - lowroom + predicted;
                             }
                             else
                             {
-                                finalY[i] = predicted - val + highroom - 1;
+                                _finalY[i] = predicted - val + highroom - 1;
                             }
                         }
                         else
@@ -483,30 +536,28 @@ namespace NVorbis
                             if ((val % 2) == 1)
                             {
                                 // odd
-                                finalY[i] = predicted - ((val + 1) / 2);
+                                _finalY[i] = predicted - ((val + 1) / 2);
                             }
                             else
                             {
                                 // even
-                                finalY[i] = predicted + (val / 2);
+                                _finalY[i] = predicted + (val / 2);
                             }
                         }
                     }
                     else
                     {
-                        stepFlags[i] = false;
-                        finalY[i] = predicted;
+                        _stepFlags[i] = false;
+                        _finalY[i] = predicted;
                     }
                 }
 
                 for (int i = 0; i < data.PostCount; i++)
                 {
-                    data.Posts[i] = finalY[i];
+                    data.Posts[i] = _finalY[i];
                 }
 
-                ACache.Return(ref finalY);
-
-                return stepFlags;
+                return _stepFlags;
             }
 
             int RenderPoint(int x0, int y0, int x1, int y1, int X)
