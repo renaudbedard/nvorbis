@@ -1,6 +1,6 @@
 ﻿/****************************************************************************
  * NVorbis                                                                  *
- * Copyright (C) 2013, Andrew Ward <afward@gmail.com>                       *
+ * Copyright (C) 2014, Andrew Ward <afward@gmail.com>                       *
  *                                                                          *
  * See COPYING for license terms (Ms-PL).                                   *
  *                                                                          *
@@ -47,6 +47,7 @@ namespace NVorbis
             {
                 // oops, not Ogg!
                 // we don't support any other container types yet, so error out
+                // TODO: Add Matroska fallback
                 bufferedStream.Close();
                 throw new InvalidDataException("Could not determine container type!");
             }
@@ -97,9 +98,7 @@ namespace NVorbis
             }
             else
             {
-                // NB: This could be an Ogg Skeleton stream...  We should check that, just in case
-                // NB: This could be a RTP stream...  We should check that, just in case
-
+                // This is almost certainly not a Vorbis stream
                 ea.IgnoreStream = true;
             }
         }
@@ -171,6 +170,11 @@ namespace NVorbis
         public string[] Comments { get { return ActiveDecoder._comments; } }
 
         /// <summary>
+        /// Gets whether the previous short sample count was due to a parameter change in the stream.
+        /// </summary>
+        public bool IsParameterChange { get { return ActiveDecoder.IsParameterChange; } }
+
+        /// <summary>
         /// Gets the number of bits read that are related to framing and transport alone
         /// </summary>
         public long ContainerOverheadBits { get { return ActiveDecoder.ContainerBits; } }
@@ -223,11 +227,29 @@ namespace NVorbis
         }
 
         /// <summary>
+        /// Clears the parameter change flag so further samples can be requested.
+        /// </summary>
+        public void ClearParameterChange()
+        {
+            ActiveDecoder.IsParameterChange = false;
+        }
+
+        /// <summary>
         /// Returns the number of logical streams found so far in the physical container
         /// </summary>
         public int StreamCount
         {
             get { return _decoders.Count; }
+        }
+
+        /// <summary>
+        /// Searches for the next stream in a concatenated file
+        /// </summary>
+        /// <returns><c>True</c> if a new stream was found, otherwise <c>false</c>.</returns>
+        public bool FindNextStream()
+        {
+            if (_containerReader == null) return false;
+            return _containerReader.FindNextStream();
         }
 
         /// <summary>
