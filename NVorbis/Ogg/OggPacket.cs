@@ -1,6 +1,6 @@
 ﻿/****************************************************************************
  * NVorbis                                                                  *
- * Copyright (C) 2012, Andrew Ward <afward@gmail.com>                       *
+ * Copyright (C) 2014, Andrew Ward <afward@gmail.com>                       *
  *                                                                          *
  * See COPYING for license terms (Ms-PL).                                   *
  *                                                                          *
@@ -15,37 +15,46 @@ namespace NVorbis.Ogg
 {
     class Packet : DataPacket
     {
-        Stream _stream;
+        long _offset;                       // 8
+        int _length;                        // 4
+        int _curOfs;                        // 4
+        Packet _mergedPacket;               // IntPtr.Size
+        Packet _next;                       // IntPtr.Size
+        Packet _prev;                       // IntPtr.Size
+        ContainerReader _containerReader;   // IntPtr.Size
 
-        long _offset;
-        long _length;
-        Packet _mergedPacket;
+        internal Packet Next
+        {
+            get { return _next; }
+            set { _next = value; }
+        }
+        internal Packet Prev
+        {
+            get { return _prev; }
+            set { _prev = value; }
+        }
+        internal bool IsContinued
+        {
+            get { return GetFlag(PacketFlags.User1); }
+            set { SetFlag(PacketFlags.User1, value); }
+        }
+        internal bool IsContinuation
+        {
+            get { return GetFlag(PacketFlags.User2); }
+            set { SetFlag(PacketFlags.User2, value); }
+        }
 
-        byte[] _savedBuffer;
-        int _bufOffset;
-
-        internal Packet Next { get; set; }
-        internal Packet Prev { get; set; }
-
-        int _curOfs;
-
-        internal Packet(Stream stream, long streamOffset, int length)
+        internal Packet(ContainerReader containerReader, long streamOffset, int length)
             : base(length)
         {
-            _stream = stream;
+            _containerReader = containerReader;
 
             _offset = streamOffset;
             _length = length;
             _curOfs = 0;
         }
 
-        internal void SetBuffer(byte[] savedBuf, int offset)
-        {
-            _savedBuffer = savedBuf;
-            _bufOffset = offset;
-        }
-
-        protected override void DoMergeWith(NVorbis.DataPacket continuation)
+        internal void MergeWith(NVorbis.DataPacket continuation)
         {
             var op = continuation as Packet;
 
@@ -59,7 +68,7 @@ namespace NVorbis.Ogg
             }
             else
             {
-                _mergedPacket.DoMergeWith(continuation);
+                _mergedPacket.MergeWith(continuation);
             }
 
             // per the spec, a partial packet goes with the next page's granulepos.  we'll go ahead and assign it to the next page as well
@@ -67,18 +76,14 @@ namespace NVorbis.Ogg
             PageSequenceNumber = continuation.PageSequenceNumber;
         }
 
-        protected override bool CanReset
-        {
-            get { return true; }
-        }
-
-        protected override void DoReset()
+        internal void Reset()
         {
             _curOfs = 0;
+            ResetBitReader();
 
             if (_mergedPacket != null)
             {
-                _mergedPacket.DoReset();
+                _mergedPacket.Reset();
             }
         }
 
@@ -91,23 +96,23 @@ namespace NVorbis.Ogg
                 return _mergedPacket.ReadNextByte();
             }
 
-            if (_savedBuffer != null)
+            var b = _containerReader.PacketReadByte(_offset + _curOfs);
+            if (b != -1)
             {
-                return _savedBuffer[_bufOffset + _curOfs++];
+                ++_curOfs;
             }
-
-            _stream.Seek(_curOfs + _offset, SeekOrigin.Begin);
-
-            var b = _stream.ReadByte();
-            ++_curOfs;
             return b;
         }
 
         public override void Done()
         {
-            if (_savedBuffer != null)
+            if (_mergedPacket != null)
             {
-                _savedBuffer = null;
+                _mergedPacket.Done();
+            }
+            else
+            {
+                _containerReader.PacketDiscardThrough(_offset + _length);
             }
         }
     }

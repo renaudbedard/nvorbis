@@ -12,7 +12,7 @@ namespace TestApp
 {
     static class OpenTKStreamingTest
     {
-        static readonly string[] StreamFiles = new[] { "2test.ogg", "2test.ogg", "2test.ogg", "2test.ogg", "2test.ogg" };
+        static readonly string[] StreamFiles = new[] { "test.ogg", "2test.ogg", "3test.ogg", "4test.ogg" };
 
         static void Main()
         {
@@ -30,8 +30,9 @@ namespace TestApp
             logger.Write(" #  FX Buffering", 0, 8);
 
             using (new AudioContext())
-            using (new OggStreamer { Logger = logger })
+            using (var streamer = new OggStreamer(65536))
             {
+                streamer.Logger = logger;
                 ALHelper.CheckCapabilities(logger);
 
                 bool quit = false;
@@ -78,7 +79,7 @@ namespace TestApp
                             activeSet.ForEach(s =>
                             {
                                 s.IsLooped = !s.IsLooped;
-                                logger.Write(s.IsLooped ? "L" : " ", 3, 10 + index++);
+                                logger.Write(s.IsLooped ? "L" : " ", 3, 10 + sIdx + index++);
                             });
                             break;
 

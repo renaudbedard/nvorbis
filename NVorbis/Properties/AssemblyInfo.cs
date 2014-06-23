@@ -8,9 +8,9 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyDescription("A Vorbis decoder in C#")]
 [assembly: AssemblyCompany("Andrew Ward")]
 [assembly: AssemblyProduct("NVorbis")]
-[assembly: AssemblyCopyright("Copyright © Andrew Ward 2012")]
+[assembly: AssemblyCopyright("Copyright © Andrew Ward 2014")]
 
 [assembly: ComVisible(false)]
 
-[assembly: AssemblyVersion("0.5.5.0")]
-[assembly: AssemblyFileVersion("0.5.5.0")]
+[assembly: AssemblyVersion("0.8.3.0")]
+[assembly: AssemblyFileVersion("0.8.3.0")]
